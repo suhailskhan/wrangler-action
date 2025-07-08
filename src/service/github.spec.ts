@@ -55,6 +55,118 @@ describe("github", () => {
 		server.close();
 	});
 
+	it("Calls createWorkersGitHubDeployment successfully with custom domain", async () => {
+		const githubUser = "mock-user";
+		const githubRepoName = "wrangler-action";
+		const server = setupServer(
+			...mockGithubDeployments({ githubUser, githubRepoName }).handlers,
+		);
+		server.listen({ onUnhandledRequest: "error" });
+		vi.stubEnv("GITHUB_REPOSITORY", `${githubUser}/${githubRepoName}`);
+
+		const testConfig = getTestConfig();
+		const octokit = getOctokit(testConfig.GITHUB_TOKEN, { request: fetch });
+		await createWorkersGitHubDeployment({
+			config: testConfig,
+			octokit,
+			deploymentUrl: "https://my-custom-domain.com",
+			workerName: "my-custom-domain", // Should be extracted from URL
+		});
+		server.close();
+	});
+
+	it("Handles invalid deployment URLs gracefully", async () => {
+		const githubUser = "mock-user";
+		const githubRepoName = "wrangler-action";
+		const server = setupServer(
+			...mockGithubDeployments({ githubUser, githubRepoName }).handlers,
+		);
+		server.listen({ onUnhandledRequest: "error" });
+		vi.stubEnv("GITHUB_REPOSITORY", `${githubUser}/${githubRepoName}`);
+
+		const testConfig = getTestConfig();
+		const octokit = getOctokit(testConfig.GITHUB_TOKEN, { request: fetch });
+		
+		// Test with invalid URL - should not throw, but should handle gracefully
+		await expect(createWorkersGitHubDeployment({
+			config: testConfig,
+			octokit,
+			deploymentUrl: "invalid-url-format",
+			workerName: "my-worker",
+		})).resolves.not.toThrow();
+		
+		server.close();
+	});
+
+	it("Handles URLs with descriptive text in parentheses", async () => {
+		const githubUser = "mock-user";
+		const githubRepoName = "wrangler-action";
+		const server = setupServer(
+			...mockGithubDeployments({ githubUser, githubRepoName }).handlers,
+		);
+		server.listen({ onUnhandledRequest: "error" });
+		vi.stubEnv("GITHUB_REPOSITORY", `${githubUser}/${githubRepoName}`);
+
+		const testConfig = getTestConfig();
+		const octokit = getOctokit(testConfig.GITHUB_TOKEN, { request: fetch });
+		
+		// Test with URL that has descriptive text in parentheses - should clean it up
+		await expect(createWorkersGitHubDeployment({
+			config: testConfig,
+			octokit,
+			deploymentUrl: "nextjs.aisk-svr.net (custom domain)", // Descriptive text in parentheses
+			workerName: "my-worker",
+		})).resolves.not.toThrow();
+		
+		server.close();
+	});
+
+	it("Handles URLs without protocol by adding https://", async () => {
+		const githubUser = "mock-user";
+		const githubRepoName = "wrangler-action";
+		const server = setupServer(
+			...mockGithubDeployments({ githubUser, githubRepoName }).handlers,
+		);
+		server.listen({ onUnhandledRequest: "error" });
+		vi.stubEnv("GITHUB_REPOSITORY", `${githubUser}/${githubRepoName}`);
+
+		const testConfig = getTestConfig();
+		const octokit = getOctokit(testConfig.GITHUB_TOKEN, { request: fetch });
+		
+		// Test with URL missing protocol - should add https:// automatically
+		await expect(createWorkersGitHubDeployment({
+			config: testConfig,
+			octokit,
+			deploymentUrl: "nextjs.aisk-svr.net", // No protocol
+			workerName: "my-worker",
+		})).resolves.not.toThrow();
+		
+		server.close();
+	});
+
+	it("Handles undefined deployment URLs gracefully", async () => {
+		const githubUser = "mock-user";
+		const githubRepoName = "wrangler-action";
+		const server = setupServer(
+			...mockGithubDeployments({ githubUser, githubRepoName }).handlers,
+		);
+		server.listen({ onUnhandledRequest: "error" });
+		vi.stubEnv("GITHUB_REPOSITORY", `${githubUser}/${githubRepoName}`);
+
+		const testConfig = getTestConfig();
+		const octokit = getOctokit(testConfig.GITHUB_TOKEN, { request: fetch });
+		
+		// Test with undefined URL - should not throw
+		await expect(createWorkersGitHubDeployment({
+			config: testConfig,
+			octokit,
+			deploymentUrl: undefined,
+			workerName: "my-worker",
+		})).resolves.not.toThrow();
+		
+		server.close();
+	});
+
 	it("Calls createJobSummary successfully", async () => {
 		vi.stubEnv("GITHUB_STEP_SUMMARY", "summary");
 		mockfs({

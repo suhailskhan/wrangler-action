@@ -42,19 +42,45 @@ export async function createGitHubDeployment({
 		info(config, "Error creating GitHub deployment");
 		return;
 	}
-	await octokit.rest.repos.createDeploymentStatus({
+
+	// Validate deployment URL before using it
+	let validatedEnvironmentUrl: string | undefined;
+	if (deploymentUrl) {
+		try {
+			// Clean up the URL by removing any descriptive text in parentheses
+			let cleanedUrl = deploymentUrl.replace(/\s*\([^)]*\)\s*$/, '').trim();
+			
+			// If URL doesn't have a protocol, default to https://
+			let urlToValidate = cleanedUrl;
+			if (!cleanedUrl.startsWith('http://') && !cleanedUrl.startsWith('https://')) {
+				urlToValidate = `https://${cleanedUrl}`;
+			}
+			
+			const url = new URL(urlToValidate);
+			if (url.protocol === 'https:' || url.protocol === 'http:') {
+				validatedEnvironmentUrl = urlToValidate;
+			} else {
+				info(config, `Invalid deployment URL protocol: ${deploymentUrl}. Must use http(s) scheme.`);
+			}
+		} catch (error) {
+			info(config, `Invalid deployment URL format: ${deploymentUrl}. Error: ${error}`);
+		}
+	}
+
+	const deploymentStatusPayload = {
 		owner: context.repo.owner,
 		repo: context.repo.repo,
 		deployment_id: deployment.data.id,
 		environment,
-		environment_url: deploymentUrl,
 		production_environment: productionEnvironment,
-		// don't have project_name or deployment_id I think
 		log_url: `https://dash.cloudflare.com/${config.CLOUDFLARE_ACCOUNT_ID}/pages/view/${projectName}/${deploymentId}`,
 		description: "Cloudflare Pages",
-		state: "success",
+		state: "success" as const,
 		auto_inactive: false,
-	});
+		...(validatedEnvironmentUrl && { environment_url: validatedEnvironmentUrl }),
+	};
+
+	await octokit.rest.repos.createDeploymentStatus(deploymentStatusPayload);
 }
 
 export async function createWorkersGitHubDeployment({
@@ -72,38 +98,70 @@ export async function createWorkersGitHubDeployment({
 	const environment = githubBranch === "main" || githubBranch === "master" ? "production" : "preview";
 	const productionEnvironment = environment === "production";
 
-	const deployment = await octokit.rest.repos.createDeployment({
-		owner: context.repo.owner,
-		repo: context.repo.repo,
-		ref: githubBranch || context.ref,
-		auto_merge: false,
-		description: "Cloudflare Workers",
-		required_contexts: [],
-		environment,
-		production_environment: productionEnvironment,
-	});
+	try {
+		const deployment = await octokit.rest.repos.createDeployment({
+			owner: context.repo.owner,
+			repo: context.repo.repo,
+			ref: githubBranch || context.ref,
+			auto_merge: false,
+			description: "Cloudflare Workers",
+			required_contexts: [],
+			environment,
+			production_environment: productionEnvironment,
+		});
 
-	if (deployment.status !== 201) {
-		info(config, "Error creating GitHub deployment");
-		return;
+		if (deployment.status !== 201) {
+			info(config, `Error creating GitHub deployment. Status: ${deployment.status}`);
+			return;
+		}
+
+		const logUrl = workerName 
+			? `https://dash.cloudflare.com/${config.CLOUDFLARE_ACCOUNT_ID}/workers/services/view/${workerName}`
+			: `https://dash.cloudflare.com/${config.CLOUDFLARE_ACCOUNT_ID}/workers`;
+
+	// Validate deployment URL before using it
+	let validatedEnvironmentUrl: string | undefined;
+	if (deploymentUrl) {
+		try {
+			// Clean up the URL by removing any descriptive text in parentheses
+			let cleanedUrl = deploymentUrl.replace(/\s*\([^)]*\)\s*$/, '').trim();
+			
+			// If URL doesn't have a protocol, default to https://
+			let urlToValidate = cleanedUrl;
+			if (!cleanedUrl.startsWith('http://') && !cleanedUrl.startsWith('https://')) {
+				urlToValidate = `https://${cleanedUrl}`;
+			}
+			
+			const url = new URL(urlToValidate);
+			if (url.protocol === 'https:' || url.protocol === 'http:') {
+				validatedEnvironmentUrl = urlToValidate;
+			} else {
+				info(config, `Invalid deployment URL protocol: ${deploymentUrl}. Must use http(s) scheme.`);
+			}
+		} catch (error) {
+			info(config, `Invalid deployment URL format: ${deploymentUrl}. Error: ${error}`);
+		}
 	}
 
-	const logUrl = workerName 
-		? `https://dash.cloudflare.com/${config.CLOUDFLARE_ACCOUNT_ID}/workers/services/view/${workerName}`
-		: `https://dash.cloudflare.com/${config.CLOUDFLARE_ACCOUNT_ID}/workers`;
+		const deploymentStatusPayload = {
+			owner: context.repo.owner,
+			repo: context.repo.repo,
+			deployment_id: deployment.data.id,
+			environment,
+			production_environment: productionEnvironment,
+			log_url: logUrl,
+			description: "Cloudflare Workers",
+			state: "success" as const,
+			auto_inactive: false,
+			...(validatedEnvironmentUrl && { environment_url: validatedEnvironmentUrl }),
+		};
 
-	await octokit.rest.repos.createDeploymentStatus({
-		owner: context.repo.owner,
-		repo: context.repo.repo,
-		deployment_id: deployment.data.id,
-		environment,
-		environment_url: deploymentUrl,
-		production_environment: productionEnvironment,
-		log_url: logUrl,
-		description: "Cloudflare Workers",
-		state: "success",
-		auto_inactive: false,
-	});
+		await octokit.rest.repos.createDeploymentStatus(deploymentStatusPayload);
+
+		info(config, `Successfully created GitHub deployment for Workers with URL: ${validatedEnvironmentUrl || 'N/A'}`);
+	} catch (error) {
+		throw new Error(`Failed to create Workers GitHub deployment: ${error}`);
+	}
 }
 
 export async function createJobSummary({
@@ -214,34 +272,61 @@ export async function createWorkersGitHubDeploymentAndJobSummary(
 		// Extract worker name from deployment URL if possible
 		let workerName: string | undefined;
 		if (deploymentUrl) {
-			const match = deploymentUrl.match(/https:\/\/([^.]+)\./);
-			workerName = match?.[1];
+			// Clean up the URL by removing any descriptive text in parentheses
+			let cleanedUrl = deploymentUrl.replace(/\s*\([^)]*\)\s*$/, '').trim();
+			
+			// Try to extract worker name from standard workers.dev URL
+			const workersDevMatch = cleanedUrl.match(/https:\/\/([^.]+)\.([^.]+\.)?workers\.dev/);
+			if (workersDevMatch) {
+				workerName = workersDevMatch[1];
+			} else {
+				// For custom domains, try to extract from subdomain or use hostname
+				try {
+					// Add protocol if missing for URL parsing
+					let urlToParse = cleanedUrl;
+					if (!cleanedUrl.startsWith('http://') && !cleanedUrl.startsWith('https://')) {
+						urlToParse = `https://${cleanedUrl}`;
+					}
+					
+					const url = new URL(urlToParse);
+					const hostname = url.hostname;
+					// Use the first part of the hostname as worker name for custom domains
+					workerName = hostname.split('.')[0];
+				} catch (error) {
+					// If URL parsing fails, continue without worker name
+					info(config, `Could not parse deployment URL for worker name: ${deploymentUrl}`);
+				}
+			}
 		}
 
 		// Get commit hash from git context
 		const commitHash = context.sha?.substring(0, 8);
 
-		const [createGitHubDeploymentRes, createJobSummaryRes] =
-			await Promise.allSettled([
-				createWorkersGitHubDeployment({
-					config,
-					octokit,
-					deploymentUrl,
-					workerName,
-				}),
-				createJobSummaryForWorkers({
-					commitHash,
-					deploymentUrl,
-					workerName,
-				}),
-			]);
+		try {
+			const [createGitHubDeploymentRes, createJobSummaryRes] =
+				await Promise.allSettled([
+					createWorkersGitHubDeployment({
+						config,
+						octokit,
+						deploymentUrl,
+						workerName,
+					}),
+					createJobSummaryForWorkers({
+						commitHash,
+						deploymentUrl,
+						workerName,
+					}),
+				]);
 
-		if (createGitHubDeploymentRes.status === "rejected") {
-			warn(config, "Creating Workers Github Deployment failed");
-		}
+			if (createGitHubDeploymentRes.status === "rejected") {
+				warn(config, `Creating Workers Github Deployment failed: ${createGitHubDeploymentRes.reason}`);
+			}
 
-		if (createJobSummaryRes.status === "rejected") {
-			warn(config, "Creating Workers Github Job summary failed");
+			if (createJobSummaryRes.status === "rejected") {
+				warn(config, `Creating Workers Github Job summary failed: ${createJobSummaryRes.reason}`);
+			}
+		} catch (error) {
+			warn(config, `Failed to create Workers GitHub deployment: ${error}`);
 		}
 	}
 }
